@@ -159,33 +159,32 @@ def draw_hud(frame, session_idx, recording, elapsed, face_detected):
 def build_pipeline():
     pipeline = dai.Pipeline()
 
-    # Use Camera node (replaces deprecated ColorCamera)
-    cam = pipeline.create(dai.node.Camera)
+    # ColorCamera + MonoCamera (deprecated warnings are harmless, API still works)
+    cam = pipeline.create(dai.node.ColorCamera)
     cam.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+    cam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+    cam.setPreviewSize(PREVIEW_W, PREVIEW_H)
+    cam.setInterleaved(False)
+    cam.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
     cam.setFps(FPS)
 
-    # Preview output for color frames
-    cam_preview = cam.requestOutput(
-        (PREVIEW_W, PREVIEW_H), dai.ImgFrame.Type.BGR888p
-    )
-
-    # Use Camera node for mono cameras (replaces deprecated MonoCamera)
-    mono_l = pipeline.create(dai.node.Camera)
-    mono_r = pipeline.create(dai.node.Camera)
+    mono_l = pipeline.create(dai.node.MonoCamera)
+    mono_r = pipeline.create(dai.node.MonoCamera)
+    mono_l.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+    mono_r.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
     mono_l.setBoardSocket(dai.CameraBoardSocket.CAM_B)
     mono_r.setBoardSocket(dai.CameraBoardSocket.CAM_C)
     mono_l.setFps(FPS)
     mono_r.setFps(FPS)
 
     stereo = pipeline.create(dai.node.StereoDepth)
-    # Use FAST_DENSITY (HIGH_DENSITY removed in newer DepthAI versions)
     stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.FAST_DENSITY)
     stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
     stereo.setOutputSize(PREVIEW_W, PREVIEW_H)
     stereo.setLeftRightCheck(True)
     stereo.setSubpixel(False)
-    mono_l.requestOutput((640, 400), dai.ImgFrame.Type.RAW8).link(stereo.left)
-    mono_r.requestOutput((640, 400), dai.ImgFrame.Type.RAW8).link(stereo.right)
+    mono_l.out.link(stereo.left)
+    mono_r.out.link(stereo.right)
 
     face_det = pipeline.create(dai.node.MobileNetDetectionNetwork)
     face_det.setConfidenceThreshold(0.5)
@@ -196,12 +195,12 @@ def build_pipeline():
         )
     )
     face_det.input.setBlocking(False)
-    cam_preview.link(face_det.input)
+    cam.preview.link(face_det.input)
 
     xout_rgb  = pipeline.create(dai.node.XLinkOut); xout_rgb.setStreamName("rgb")
     xout_dep  = pipeline.create(dai.node.XLinkOut); xout_dep.setStreamName("depth")
     xout_face = pipeline.create(dai.node.XLinkOut); xout_face.setStreamName("face")
-    cam_preview.link(xout_rgb.input)
+    cam.preview.link(xout_rgb.input)
     stereo.depth.link(xout_dep.input)
     face_det.out.link(xout_face.input)
 
