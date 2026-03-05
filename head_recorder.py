@@ -159,23 +159,18 @@ def draw_hud(frame, session_idx, recording, elapsed, face_detected):
 def build_pipeline():
     pipeline = dai.Pipeline()
 
-    # ColorCamera + MonoCamera (deprecated warnings are harmless, API still works)
-    cam = pipeline.create(dai.node.ColorCamera)
-    cam.setBoardSocket(dai.CameraBoardSocket.CAM_A)
-    cam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-    cam.setPreviewSize(PREVIEW_W, PREVIEW_H)
-    cam.setInterleaved(False)
-    cam.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+    # DepthAI 3.x API: Camera node replaces ColorCamera/MonoCamera
+    # Socket is passed as second argument to pipeline.create()
+    cam = pipeline.create(dai.node.Camera, dai.CameraBoardSocket.CAM_A)
     cam.setFps(FPS)
+    cam_preview = cam.requestOutput((PREVIEW_W, PREVIEW_H), dai.ImgFrame.Type.BGR888p)
 
-    mono_l = pipeline.create(dai.node.MonoCamera)
-    mono_r = pipeline.create(dai.node.MonoCamera)
-    mono_l.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-    mono_r.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-    mono_l.setBoardSocket(dai.CameraBoardSocket.CAM_B)
-    mono_r.setBoardSocket(dai.CameraBoardSocket.CAM_C)
+    mono_l = pipeline.create(dai.node.Camera, dai.CameraBoardSocket.CAM_B)
+    mono_r = pipeline.create(dai.node.Camera, dai.CameraBoardSocket.CAM_C)
     mono_l.setFps(FPS)
     mono_r.setFps(FPS)
+    mono_l_out = mono_l.requestOutput((640, 400), dai.ImgFrame.Type.GRAY8)
+    mono_r_out = mono_r.requestOutput((640, 400), dai.ImgFrame.Type.GRAY8)
 
     stereo = pipeline.create(dai.node.StereoDepth)
     stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.FAST_DENSITY)
@@ -183,26 +178,16 @@ def build_pipeline():
     stereo.setOutputSize(PREVIEW_W, PREVIEW_H)
     stereo.setLeftRightCheck(True)
     stereo.setSubpixel(False)
-    mono_l.out.link(stereo.left)
-    mono_r.out.link(stereo.right)
+    mono_l_out.link(stereo.left)
+    mono_r_out.link(stereo.right)
 
-    face_det = pipeline.create(dai.node.MobileNetDetectionNetwork)
-    face_det.setConfidenceThreshold(0.5)
-    face_det.setBlobPath(
-        dai.OpenVINO.getBlobLatestVersion(
-            "face-detection-retail-0004",
-            dai.OpenVINO.Version.VERSION_2022_1, 6,
-        )
-    )
-    face_det.input.setBlocking(False)
-    cam.preview.link(face_det.input)
+    # MobileNetDetectionNetwork removed in depthai 3.x
+    # Face detection is handled on CPU with OpenCV in the main loop instead
 
     xout_rgb  = pipeline.create(dai.node.XLinkOut); xout_rgb.setStreamName("rgb")
     xout_dep  = pipeline.create(dai.node.XLinkOut); xout_dep.setStreamName("depth")
-    xout_face = pipeline.create(dai.node.XLinkOut); xout_face.setStreamName("face")
-    cam.preview.link(xout_rgb.input)
+    cam_preview.link(xout_rgb.input)
     stereo.depth.link(xout_dep.input)
-    face_det.out.link(xout_face.input)
 
     return pipeline
 
@@ -253,8 +238,10 @@ def main():
         intrinsics = get_intrinsics(device)
         q_rgb  = device.getOutputQueue("rgb",   maxSize=4, blocking=False)
         q_dep  = device.getOutputQueue("depth", maxSize=4, blocking=False)
-        q_face = device.getOutputQueue("face",  maxSize=4, blocking=False)
 
+        # OpenCV CPU face detector (replaces MobileNetDetectionNetwork removed in depthai 3.x)
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        
         session_idx   = 1
         recording     = False
         rec_start     = None
@@ -269,20 +256,17 @@ def main():
         while True:
             in_rgb  = q_rgb.get()
             in_dep  = q_dep.get()
-            in_face = q_face.tryGet()
-
             color_frame = in_rgb.getCvFrame()
             depth_frame = in_dep.getFrame()
 
-            if in_face is not None:
-                dets = in_face.detections
-                face_detected = len(dets) > 0
-                if face_detected and recording:
-                    det = max(dets, key=lambda d: d.confidence)
-                    x1 = int(det.xmin * PREVIEW_W); y1 = int(det.ymin * PREVIEW_H)
-                    x2 = int(det.xmax * PREVIEW_W); y2 = int(det.ymax * PREVIEW_H)
-                    cv2.rectangle(color_frame, (x1,y1), (x2,y2), GREEN, 2)
-                    cv2.circle(color_frame, ((x1+x2)//2, (y1+y2)//2), 5, RED, -1)
+            # CPU face detection with OpenCV Haar cascade
+            gray = cv2.cvtColor(color_frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+            face_detected = len(faces) > 0
+            if face_detected:
+                x, y, w, h = faces[0]
+                cv2.rectangle(color_frame, (x, y), (x+w, y+h), GREEN, 2)
+                cv2.circle(color_frame, (x + w//2, y + h//2), 5, RED, -1)
 
             elapsed = (time.time() - rec_start) if recording else 0.0
 
